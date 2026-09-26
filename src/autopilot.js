@@ -18,7 +18,7 @@
 
 const JAVA_ACTIONS = [
   'follow', 'goto', 'stop', 'look', 'dig', 'place', 'attack', 'use',
-  'inventory', 'scan_blocks', 'scan_entities', 'scan_grid', 'plan_route', 'chat',
+  'inventory', 'scan_blocks', 'scan_entities', 'scan_grid', 'plan_route', 'goto_route', 'chat',
   'waypoint_add', 'waypoint_goto', 'skill_run', 'skill_read', 'skill_list',
   'task_status', 'task_stop', 'consent_reply', 'consent_status',
 ];
@@ -28,7 +28,7 @@ const BEDROCK_ACTIONS = ['stop', 'look', 'inventory', 'scan_blocks', 'scan_entit
 
 // Long actions run in the background as tasks (task_id) so the brain can keep
 // thinking; the body reports back through task_finished events / task_status.
-const LONG_ACTIONS = new Set(['goto', 'follow', 'dig', 'place', 'attack', 'use', 'skill_run', 'waypoint_goto']);
+const LONG_ACTIONS = new Set(['goto', 'follow', 'dig', 'place', 'attack', 'use', 'skill_run', 'waypoint_goto', 'goto_route']);
 
 const MOVE_ACTIONS = new Set(['goto', 'waypoint_goto']);
 const HOLD_ACTIONS = new Set(['follow']);
@@ -41,6 +41,7 @@ const SYSTEM_PROMPT = `You are the brain of a Minecraft companion bot that plays
 - Verify, don't assume. Look at the observation (health, position, inventory, scans) before acting; never claim an item or a finished job a result hasn't confirmed.
 - Failed results teach. A failure says WHY and usually the next step (equip a tool, move closer, scan first). Follow it; do not repeat the same call unchanged.
 - Reuse the world. A station or waypoint you saved once is worth walking back to instead of crafting a second one.
+- If a destination is blocked, call plan_route first, pick a candidate (direct/detour-left/detour-right) by its dig/place price, then goto_route with that id — don't blindly goto.
 - Never grief. Do not break or modify players' builds; dig/place only when it clearly helps the shared goal.
 - Plan only what's big. Multi-step jobs: work through them a step at a time; one-step requests: just do them.
 </operating_principles>

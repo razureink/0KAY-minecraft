@@ -81,11 +81,13 @@ instead of a bare coordinate list.
 
 ### Route planning
 
-`plan_route {x,y,z}` returns up to three candidate routes with a "price tag"
-(roughly how many blocks must be dug / placed). Walking default does **not**
-modify the world (pathfinder `canDig=false`); pass `allow_dig:true` to `goto` to
-let it break through. This mirrors Numen's "list candidate routes, don't change
-the world" rule.
+`plan_route {x,y,z}` returns up to three candidate routes (direct, detour-left,
+detour-right), each with a "price tag" (roughly how many blocks must be dug /
+placed) **and** a `waypoints` list. `goto_route {id}` executes the chosen
+candidate as a **multi-segment detour**, waiting for each leg and reporting
+where it got stuck. Walking default does **not** modify the world (pathfinder
+`canDig=false`); pass `allow_dig:true` to let it break through. This mirrors
+Numen's "list candidate routes, don't change the world" rule.
 
 ### Consent
 

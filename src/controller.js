@@ -16,7 +16,7 @@ const CHAT_LIMIT = 200;
 
 // Long-running actions become background tasks (task_id + events) when the
 // caller asks for it, so the brain can keep thinking while the body works.
-const LONG_ACTIONS = new Set(['goto', 'follow', 'dig', 'place', 'attack', 'use', 'skill_run', 'waypoint_goto']);
+const LONG_ACTIONS = new Set(['goto', 'follow', 'dig', 'place', 'attack', 'use', 'skill_run', 'waypoint_goto', 'goto_route']);
 
 // Breaking one of these (block entities / containers / player stations) or
 // hitting one of these mobs needs the owner's consent.
@@ -49,6 +49,7 @@ export class BotController {
     this.consentSeq = 0;
     this.pendingConsent = null;
     this.consentMode = String(process.env.MINECRAFT_CONSENT || 'ask').toLowerCase();
+    this.routePlan = null;
     const dataDir = process.env.MINECRAFT_DATA_DIR || './data';
     this.world = new WorldStore(path.join(dataDir, 'world.json'));
   }
@@ -305,7 +306,27 @@ export class BotController {
       case 'scan_blocks': return this.requireBot().scanBlocks(args);
       case 'scan_entities': return this.requireBot().scanEntities(args);
       case 'scan_grid': return this.requireBot().scanGrid(args);
-      case 'plan_route': return this.requireBot().planRoute(args);
+      case 'plan_route': {
+        const plan = await this.requireBot().planRoute(args);
+        this.routePlan = { ...plan, at: new Date().toISOString() };
+        return plan;
+      }
+      case 'goto_route': {
+        const plan = this.routePlan;
+        let waypoints = Array.isArray(args.waypoints) ? args.waypoints : null;
+        if (!waypoints && plan?.candidates?.length) {
+          const candidate = plan.candidates.find((c) => c.id === (args.id || plan.candidates[0].id)) || plan.candidates[0];
+          waypoints = candidate.waypoints;
+        }
+        if (!waypoints || !waypoints.length) throw new Error('no route: call plan_route first or pass waypoints');
+        const bot = this.requireBot();
+        const reached = [];
+        for (const wp of waypoints) {
+          await bot.gotoAndWait(wp.x, wp.y, wp.z, !!args.allow_dig, Number(args.timeout_ms) || Number(args.timeoutMs) || 30000);
+          reached.push({ x: wp.x, y: wp.y, z: wp.z });
+        }
+        return { reached, waypoints };
+      }
       case 'skill_read': {
         const wanted = args.id || args.name;
         const md = await this.world.markdownSkill(wanted);

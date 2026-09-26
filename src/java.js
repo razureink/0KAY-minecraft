@@ -506,9 +506,10 @@ export class JavaBot {
   }
 
   /**
-   * Plan (without moving) up to three candidate routes to a target, each with a
-   * "price tag": how many blocks must be dug and how many placed. Mirrors
-   * Numen's "list candidate routes with price tags, don't change the world".
+   * Plan (without moving) candidate routes to a target, each with a "price tag"
+   * (blocks to dig/place) AND a list of waypoints that can be executed with
+   * goto_route as a multi-segment detour. Mirrors Numen's "list candidate
+   * routes with price tags, don't change the world".
    */
   async planRoute(args = {}) {
     const bot = this.requireReady();
@@ -519,27 +520,60 @@ export class JavaBot {
     const origin = bot.entity?.position;
     if (!origin) throw new Error('position unknown');
     const ox = Math.floor(origin.x); const oy = Math.floor(origin.y); const oz = Math.floor(origin.z);
-    const sample = (y) => {
+    const cost = (points) => {
       let dig = 0; let place = 0;
-      const steps = Math.max(Math.abs(tx - ox), Math.abs(tz - oz), 1);
-      for (let i = 0; i <= steps; i++) {
-        const x = Math.round(ox + ((tx - ox) * i) / steps);
-        const z = Math.round(oz + ((tz - oz) * i) / steps);
-        const feet = bot.blockAt(new Vec3(x, y, z));
-        const head = bot.blockAt(new Vec3(x, y + 1, z));
-        const ground = bot.blockAt(new Vec3(x, y - 1, z));
-        if (feet && feet.name !== 'air') dig++;
-        if (head && head.name !== 'air') dig++;
-        if (!ground || ground.name === 'air') place++;
+      const path = [{ x: ox, y: oy, z: oz }, ...points];
+      for (let s = 0; s < path.length - 1; s++) {
+        const a = path[s]; const b = path[s + 1];
+        const steps = Math.max(Math.abs(b.x - a.x), Math.abs(b.z - a.z), 1);
+        for (let i = 0; i <= steps; i++) {
+          const x = Math.round(a.x + ((b.x - a.x) * i) / steps);
+          const z = Math.round(a.z + ((b.z - a.z) * i) / steps);
+          const y = b.y;
+          const feet = bot.blockAt(new Vec3(x, y, z));
+          const head = bot.blockAt(new Vec3(x, y + 1, z));
+          const ground = bot.blockAt(new Vec3(x, y - 1, z));
+          if (feet && feet.name !== 'air') dig++;
+          if (head && head.name !== 'air') dig++;
+          if (!ground || ground.name === 'air') place++;
+        }
       }
       return { dig, place };
     };
+    const target = { x: tx, y: ty, z: tz };
+    const mx = Math.round((ox + tx) / 2);
+    const mz = Math.round((oz + tz) / 2);
+    const spread = Math.max(3, Math.round(Math.hypot(tx - ox, tz - oz) / 4));
+    const leftWp = [{ x: mx + spread, y: oy, z: mz + spread }, target];
+    const rightWp = [{ x: mx - spread, y: oy, z: mz - spread }, target];
     const candidates = [
-      { id: 'route-current-y', y: oy, note: '沿当前高度直走', ...sample(oy) },
-      { id: 'route-target-y', y: ty, note: '先到目标高度再直走', ...sample(ty) },
-      { id: 'route-step', y: Math.min(oy, ty), note: '按较低高度走，再上下', ...sample(Math.min(oy, ty)) },
+      { id: 'direct', note: '直线过去', waypoints: [target], ...cost([target]) },
+      { id: 'detour-left', note: '向左绕一段再过去', waypoints: leftWp, ...cost(leftWp) },
+      { id: 'detour-right', note: '向右绕一段再过去', waypoints: rightWp, ...cost(rightWp) },
     ];
-    return { target: { x: tx, y: ty, z: tz }, candidates, note: 'dig/place 是该路线大概需要挖/放的方块数；走路默认不改世界，要挖请 goto 时带 allow_dig。' };
+    return { target, candidates, note: 'dig/place 是该路线大概需要挖/放的方块数；用 goto_route 执行某条候选（多段绕路）。走路默认不改世界，要挖请带 allow_dig。' };
+  }
+
+  /**
+   * Walk a route (multi-segment detour), waiting for each leg to finish. Used
+   * by goto_route to execute a plan_route candidate.
+   */
+  async gotoAndWait(x, y, z, allowDig = false, timeoutMs = 30000) {
+    const bot = this.requireReady();
+    await this.goto(x, y, z, allowDig);
+    return await new Promise((resolve, reject) => {
+      const finish = (fn, value) => { cleanup(); fn(value); };
+      const onGoal = () => finish(resolve, { reached: { x: Math.floor(Number(x)), y: Math.floor(Number(y)), z: Math.floor(Number(z)) } });
+      const onPath = (result) => { if (result?.status === 'noPath') finish(reject, new Error('no path to waypoint')); };
+      const timer = setTimeout(() => finish(reject, new Error(`waypoint timed out after ${timeoutMs}ms`)), Math.max(4000, timeoutMs));
+      function cleanup() {
+        clearTimeout(timer);
+        bot.removeListener('goal_reached', onGoal);
+        bot.removeListener('path_update', onPath);
+      }
+      bot.once('goal_reached', onGoal);
+      bot.on('path_update', onPath);
+    });
   }
 
   async disconnect() {
