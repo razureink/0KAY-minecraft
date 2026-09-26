@@ -386,6 +386,53 @@ export class JavaBot {
     return { held: bot.heldItem?.name || null, items };
   }
 
+  /** Perception: nearby blocks matching name fragments (mirrors Numen's scan_blocks). */
+  async scanBlocks(args = {}) {
+    const bot = this.requireReady();
+    const names = (Array.isArray(args.names) ? args.names : [args.name || args.block || ''])
+      .map((value) => String(value || '').toLowerCase().trim())
+      .filter(Boolean);
+    const radius = clamp(Number(args.radius) || 16, 1, 64);
+    const count = clamp(Number(args.count) || 8, 1, 32);
+    const origin = bot.entity?.position;
+    const matching = names.length
+      ? (block) => names.some((name) => block?.name === name || (block?.name || '').includes(name))
+      : (block) => !!block && block.name !== 'air';
+    const blocks = bot.findBlocks({ matching, maxDistance: radius, count }).map((pos) => {
+      const block = bot.blockAt(pos);
+      const distance = origin ? +origin.distanceTo(pos).toFixed(1) : null;
+      return { name: block?.name || 'unknown', x: pos.x, y: pos.y, z: pos.z, distance };
+    });
+    if (!blocks.length) {
+      return { blocks: [], hint: names.length ? `附近 ${radius} 格内没找到 ${names.join('/')}` : `附近 ${radius} 格内没有可交互方块` };
+    }
+    blocks.sort((a, b) => (a.distance ?? 1e9) - (b.distance ?? 1e9));
+    return { blocks };
+  }
+
+  /** Perception: nearby entities with distance (mirrors Numen's scan_nearby_entities). */
+  async scanEntities(args = {}) {
+    const bot = this.requireReady();
+    const radius = clamp(Number(args.radius) || 24, 1, 64);
+    const origin = bot.entity?.position;
+    const entities = [];
+    for (const entity of Object.values(bot.entities || {})) {
+      if (!entity || entity === bot.entity || !entity.position) continue;
+      const distance = origin ? +origin.distanceTo(entity.position).toFixed(1) : null;
+      if (distance != null && distance > radius) continue;
+      entities.push({
+        name: entity.name || entity.username || entity.displayName || entity.type || 'entity',
+        type: entity.type || '',
+        distance,
+        x: +entity.position.x.toFixed(1),
+        y: +entity.position.y.toFixed(1),
+        z: +entity.position.z.toFixed(1),
+      });
+    }
+    entities.sort((a, b) => (a.distance ?? 1e9) - (b.distance ?? 1e9));
+    return { entities: entities.slice(0, 24) };
+  }
+
   async use(item) {
     const bot = this.requireReady();
     if (item) {

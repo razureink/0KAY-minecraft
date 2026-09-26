@@ -18,28 +18,37 @@
 
 const JAVA_ACTIONS = [
   'follow', 'goto', 'stop', 'look', 'dig', 'place', 'attack', 'use',
-  'inventory', 'chat', 'waypoint_add', 'waypoint_goto', 'skill_run',
+  'inventory', 'scan_blocks', 'scan_entities', 'chat',
+  'waypoint_add', 'waypoint_goto', 'skill_run', 'skill_read', 'skill_list',
 ];
 
 // Bedrock has no movement/action implementation yet: only observe + talk.
-const BEDROCK_ACTIONS = ['stop', 'look', 'inventory', 'chat', 'waypoint_add'];
+const BEDROCK_ACTIONS = ['stop', 'look', 'inventory', 'scan_blocks', 'scan_entities', 'chat', 'waypoint_add', 'skill_read', 'skill_list'];
 
 const MOVE_ACTIONS = new Set(['goto', 'waypoint_goto']);
 const HOLD_ACTIONS = new Set(['follow']);
 
-const SYSTEM_PROMPT = `You are the brain of a Minecraft companion bot that plays alongside human players.
+const SYSTEM_PROMPT = `You are the brain of a Minecraft companion bot that plays alongside human players. You have a real body in the world and act through the tools provided. Who you are comes from your persona; this part is how your body gets things done.
+
+<operating_principles>
+- Act, don't narrate. A physical goal means CALL AN ACTION, not describe it. Keep taking actions until the goal is done or provably impossible, then report.
+- But not everything is a task. Chat, thanks, or a question you can answer: reply in "say" and call no other action.
+- Verify, don't assume. Look at the observation (health, position, inventory, scans) before acting; never claim an item or a finished job a result hasn't confirmed.
+- Failed results teach. A failure says WHY and usually the next step (equip a tool, move closer, scan first). Follow it; do not repeat the same call unchanged.
+- Reuse the world. A station or waypoint you saved once is worth walking back to instead of crafting a second one.
+- Never grief. Do not break or modify players' builds; dig/place only when it clearly helps the shared goal.
+- Plan only what's big. Multi-step jobs: work through them a step at a time; one-step requests: just do them.
+</operating_principles>
+
+<speaking>
+- One short sentence, what you'd say out loud. Say what it means for the player, not raw tool output: no coordinates, block ids or exact counts unless asked.
+- Speak when it matters: answering, a job finished or failed, danger. Don't announce every step.
+- Plain spoken sentences, no Markdown or lists.
+</speaking>
+
 Reply with exactly one JSON object and nothing else:
-{"thought": "<one short sentence>", "goal": "<optional: the current goal, only to change it>", "action": "<one action>", "args": { }, "say": "<optional short chat, or empty>"}
-Rules:
-- Think about what would actually help right now given the observation, then choose ONE action.
-- Prefer social play: follow or look at players, answer chat, stay near the group.
-- Only dig/place/attack when it clearly helps the shared goal; never grief other players' builds.
-- If a previous action of the same kind just failed, try something different (see "Recent outcomes").
-- waypoint_goto travels to a saved waypoint by name; waypoint_add remembers a useful spot (name + x/y/z).
-- skill_run replays a learned routine by name.
-- Keep "say" short (<120 chars) and only when useful, not every tick.
-- "goal" is optional; set it only when the shared objective genuinely changed.
-- If unsure, use {"action":"look","args":{"target":"nearest"},"say":""}.`;
+{"thought": "<one short sentence>", "goal": "<optional: only to change the goal>", "action": "<one action>", "args": { }, "say": "<optional short chat, or empty>"}
+If unsure, use {"action":"look","args":{"target":"nearest"},"say":""}.`;
 
 const HISTORY_LIMIT = 12;
 const FAILURE_LIMIT = 24;
@@ -91,6 +100,7 @@ export class Autopilot {
     this.lastChatAt = 0;
     this.history = [];
     this.failures = [];
+    this.lessons = [];
     this.log = [];
     this.abort = null;
   }
@@ -106,6 +116,7 @@ export class Autopilot {
       errors: this.errors,
       lastDecision: this.lastDecision,
       outcomes: this.history.slice(-6),
+      lessons: this.lessons.slice(-6),
       recent: this.log.slice(-8),
     };
   }
@@ -213,6 +224,7 @@ export class Autopilot {
       recentChat,
       waypoints: (world.waypoints || []).map((w) => ({ name: w.name, x: round(w.x), y: round(w.y), z: round(w.z) })),
       skills: (world.skills || []).map((s) => s.name),
+      knowledge: (world.markdown || []).map((s) => `${s.name}${s.note ? ` — ${s.note}` : ''}`),
       outcomes: this.history.slice(-6),
       failures: this.failures.slice(-6),
     };
@@ -232,10 +244,14 @@ export class Autopilot {
       `Players nearby: ${o.players.map((p) => (p.distance == null ? p.name : `${p.name}(${p.distance}m)`)).join(', ') || '(none)'}`,
       `Known waypoints: ${o.waypoints.map((w) => `${w.name}(${w.x},${w.y},${w.z})`).join(', ') || '(none)'}`,
       `Known skills: ${o.skills.join(', ') || '(none)'}`,
+      `Skill knowledge (Markdown, read with skill_read): ${o.knowledge.join(' | ') || '(none)'}`,
       `You were mentioned recently: ${o.mentioned ? 'yes' : 'no'}`,
     );
     if (o.outcomes.length) {
       lines.push('Recent outcomes (newest last):', ...o.outcomes.map((h) => `- ${h.action}: ${h.result}${h.detail ? ` (${h.detail})` : ''}`));
+    }
+    if (this.lessons.length) {
+      lines.push('Lessons learned this session (do not repeat these mistakes):', ...this.lessons.map((l) => `- ${l}`));
     }
     if (o.failures.length) {
       lines.push('Known failure patterns:', ...o.failures.map((f) => `- ${f}`));
@@ -369,6 +385,25 @@ export class Autopilot {
       const message = detail ? `${action}: ${detail}` : action;
       if (!this.failures.includes(message)) this.failures.push(message);
       if (this.failures.length > FAILURE_LIMIT) this.failures.splice(0, this.failures.length - FAILURE_LIMIT);
+      this.#lesson(action, detail);
     }
+  }
+
+  /**
+   * Turn a failure into a teaching sentence, the way Numen feeds "why + next
+   * step" back to the model instead of a bare error.
+   */
+  #lesson(action, detail) {
+    const text = String(detail || '').toLowerCase();
+    let hint;
+    if (action === 'dig' && /tool|pickaxe|axe|shovel|break|hard/.test(text)) hint = '换/装备合适的镐或斧再挖，靠近方块，并先清除遮挡。';
+    else if (action === 'place' && /item|inventory/.test(text)) hint = '背包里没有该物品，先去采集或合成。';
+    else if (action === 'place' && /adjacent|reference|against/.test(text)) hint = '放置要贴着实心方块，换一个相邻面再放。';
+    else if ((action === 'goto' || action === 'waypoint_goto' || action === 'follow') && /timed out|did not move|no path|unreachable/.test(text)) hint = '寻路卡住了：先 goto 到更近的点、绕开障碍，或换目标。';
+    else if (/not found|no nearby|no block/.test(text)) hint = '目标不存在或不在范围内，先用 scan_blocks/scan_entities 确认。';
+    else hint = '换一个不同的动作或参数，不要原样重试。';
+    const message = detail ? `${action}: ${String(detail).slice(0, 120)} — ${hint}` : `${action}: ${hint}`;
+    if (!this.lessons.includes(message)) this.lessons.push(message);
+    if (this.lessons.length > 10) this.lessons.splice(0, this.lessons.length - 10);
   }
 }

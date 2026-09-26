@@ -43,6 +43,27 @@ Movement actions (`goto`, `waypoint_goto`) run under a timeout and check the
 position delta, so a stuck path is reported back instead of hanging. Chat is
 rate limited. Bedrock currently exposes only observe/talk actions (no movement).
 
+### Feedback loop
+
+Every failure is turned into a **teaching sentence** ("dig: 徒手挖不动… — 换/装备
+合适的镐…") and kept for the session, so the model follows the "why + next step"
+instead of repeating the same call. The design follows
+[Numen](https://github.com/Dwinovo/minecraft-numen): a tool result should teach
+the model how to play, not just report an error.
+
+### Perception
+
+`scan_blocks` (find blocks by name within a radius) and `scan_entities` (nearby
+entities with distance) give the model eyes, so it does not have to guess
+coordinates.
+
+### Skills (Markdown)
+
+Drop `.md` files in `skills/` (or set `MINECRAFT_SKILLS_DIR`). Each file is
+shared knowledge the bot can see (names + first line) and read in full with
+`skill_read` — the same zero-code "teach it a mod" idea as Numen's
+`config/numen/skills/*.md`. `skills/survival-basics.md` is a shipped example.
+
 ## HTTP API
 
 All JSON. Optional `Authorization: Bearer $MINECRAFT_TOKEN`.

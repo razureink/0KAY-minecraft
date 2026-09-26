@@ -114,8 +114,12 @@ export class BotController {
   async worldSnapshot() {
     await this.world.ready;
     const key = this.serverKey();
-    const [waypoints, skills] = await Promise.all([this.world.listWaypoints(key), this.world.listSkills(key)]);
-    return { server: key, waypoints, skills };
+    const [waypoints, skills, markdown] = await Promise.all([
+      this.world.listWaypoints(key),
+      this.world.listSkills(key),
+      this.world.markdownSkills(),
+    ]);
+    return { server: key, waypoints, skills, markdown };
   }
 
   async status() {
@@ -166,6 +170,16 @@ export class BotController {
       case 'inventory': return this.requireBot().inventory();
       case 'use': return this.requireBot().use(args.item);
       case 'players': return { players: this.bot ? this.bot.playerList?.() ?? this.bot.describe().players : [] };
+      case 'scan_blocks': return this.requireBot().scanBlocks(args);
+      case 'scan_entities': return this.requireBot().scanEntities(args);
+      case 'skill_read': {
+        const wanted = args.id || args.name;
+        const md = await this.world.markdownSkill(wanted);
+        if (md) return md;
+        const skill = await this.world.getSkill(key, wanted);
+        if (!skill) throw new Error(`skill not found: ${wanted}`);
+        return skill;
+      }
       case 'events': return { cursor: this.eventSeq, events: this.eventsSince(args.since) };
       case 'status': return this.status();
       case 'world': return this.worldSnapshot();
@@ -178,7 +192,11 @@ export class BotController {
         return this.requireBot().goto(wp.x, wp.y, wp.z);
       }
       case 'skill_save': return this.world.saveSkill(key, args);
-      case 'skill_list': return { skills: (await this.world.listSkills(key)).map(({ steps, ...rest }) => ({ ...rest, steps: steps.length })) };
+      case 'skill_list': {
+        const native = (await this.world.listSkills(key)).map(({ steps, ...rest }) => ({ ...rest, steps: steps.length, kind: 'steps' }));
+        const md = (await this.world.markdownSkills()).map(({ body, ...rest }) => ({ ...rest, kind: 'markdown' }));
+        return { skills: [...native, ...md] };
+      }
       case 'skill_remove': return { removed: await this.world.removeSkill(key, args.id || args.name) };
       case 'skill_run': return this.runSkill(args.id || args.name);
       default: throw new Error(`unknown action: ${name}`);

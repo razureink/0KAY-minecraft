@@ -15,8 +15,11 @@ function slug(value, fallback) {
 export class WorldStore {
   constructor(file) {
     this.file = file;
+    this.skillsDir = process.env.MINECRAFT_SKILLS_DIR || path.join(process.cwd(), 'skills');
     this.data = { servers: {} };
+    this.markdown = [];
     this.ready = this.#load();
+    this.readySkills = this.#loadMarkdown();
   }
 
   async #load() {
@@ -26,6 +29,50 @@ export class WorldStore {
     } catch {
       this.data = { servers: {} };
     }
+  }
+
+  /**
+   * Markdown skills are shared knowledge (how to play a mod, base rules),
+   * mirroring Numen's `config/numen/skills/*.md`: drop a .md file in the skills
+   * dir and the bot can read it. Zero code, no per-mod adaptation.
+   */
+  async #loadMarkdown() {
+    this.markdown = [];
+    let entries = [];
+    try {
+      entries = await fs.readdir(this.skillsDir);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      if (!name.toLowerCase().endsWith('.md')) continue;
+      try {
+        const content = await fs.readFile(path.join(this.skillsDir, name), 'utf8');
+        const lines = content.split(/\r?\n/);
+        const heading = lines.find((line) => /^#{1,3}\s+\S/.test(line));
+        const title = heading ? heading.replace(/^#{1,3}\s+/, '').trim() : name.replace(/\.md$/i, '');
+        const note = lines.map((line) => line.trim()).find((line) => line && !line.startsWith('#')) || '';
+        this.markdown.push({
+          id: slug(name.replace(/\.md$/i, ''), name),
+          name: title,
+          note: note.slice(0, 140),
+          body: content.slice(0, 4000),
+          source: 'markdown',
+        });
+      } catch {
+        // a broken file should never stop the others
+      }
+    }
+  }
+
+  async markdownSkills() {
+    await this.readySkills;
+    return this.markdown;
+  }
+
+  async markdownSkill(idOrName) {
+    const target = String(idOrName || '').trim().toLowerCase();
+    return (await this.markdownSkills()).find((skill) => skill.id === slug(idOrName, '') || skill.name.toLowerCase() === target) || null;
   }
 
   async save() {
