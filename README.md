@@ -64,6 +64,44 @@ shared knowledge the bot can see (names + first line) and read in full with
 `skill_read` — the same zero-code "teach it a mod" idea as Numen's
 `config/numen/skills/*.md`. `skills/survival-basics.md` is a shipped example.
 
+### Background tasks
+
+Long actions (`goto`, `follow`, `dig`, `place`, `attack`, `use`, `skill_run`,
+`waypoint_goto`) can run as background tasks: call them with `background:true`
+and the service returns a `task_id` immediately, emits `task_started` /
+`task_finished` events, and reports live state via `task_status`. `task_stop`
+aborts. ONE body, ONE job — a second long action is refused while one runs. The
+autopilot uses this so it can keep thinking instead of blocking on a slow walk.
+
+### Spatial grid
+
+`scan_grid` returns an egocentric grid of block short-codes around the bot (feet
+and eye level) plus a legend, so the model gets a picture of its surroundings
+instead of a bare coordinate list.
+
+### Route planning
+
+`plan_route {x,y,z}` returns up to three candidate routes with a "price tag"
+(roughly how many blocks must be dug / placed). Walking default does **not**
+modify the world (pathfinder `canDig=false`); pass `allow_dig:true` to `goto` to
+let it break through. This mirrors Numen's "list candidate routes, don't change
+the world" rule.
+
+### Consent
+
+Breaking a block-entity block (chest/furnace/bed/door/…), placing onto an
+existing block, or attacking a villager/pet/named mob raises a `consent_request`
+event and waits for `consent_reply {id, approve}` (60s timeout → deny). A denied
+action returns `{refused:true, reason}` and is not executed. Set
+`MINECRAFT_CONSENT=allow|deny|ask` (default `ask`).
+
+### External brain (MCP)
+
+Set `MINECRAFT_MCP=1` to also expose the bot over the Model Context Protocol on
+stdio, so an external AI client (Claude Desktop, Cursor, …) can drive it with
+`tools/list` + `tools/call` (`minecraft_status`, `minecraft_action`). Because
+stdio is the transport, logs are routed to stderr in this mode.
+
 ## HTTP API
 
 All JSON. Optional `Authorization: Bearer $MINECRAFT_TOKEN`.

@@ -14,6 +14,19 @@ import { WorldStore } from './world.js';
 
 const CHAT_LIMIT = 200;
 
+// Long-running actions become background tasks (task_id + events) when the
+// caller asks for it, so the brain can keep thinking while the body works.
+const LONG_ACTIONS = new Set(['goto', 'follow', 'dig', 'place', 'attack', 'use', 'skill_run', 'waypoint_goto']);
+
+// Breaking one of these (block entities / containers / player stations) or
+// hitting one of these mobs needs the owner's consent.
+const BLOCK_ENTITY_BLOCKS = new Set([
+  'chest', 'trapped_chest', 'barrel', 'furnace', 'blast_furnace', 'smoker', 'hopper',
+  'dispenser', 'dropper', 'ender_chest', 'shulker_box', 'beacon', 'spawner', 'jukebox',
+  'lectern', 'crafting_table', 'anvil', 'enchanting_table', 'brewing_stand', 'campfire', 'bed',
+]);
+const PROTECTED_ENTITY = /villager|wandering_trader|wolf|cat|ocelot|parrot|horse|donkey|mule|llama|axolotl|allay|snow_golem|fox|bee|panda|turtle|camel|frog|goat|strider|iron_golem/i;
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -30,6 +43,12 @@ export class BotController {
     this.lastAction = null;
     this.events = [];
     this.eventSeq = 0;
+    this.tasks = new Map();
+    this.taskSeq = 0;
+    this.runningTaskId = null;
+    this.consentSeq = 0;
+    this.pendingConsent = null;
+    this.consentMode = String(process.env.MINECRAFT_CONSENT || 'ask').toLowerCase();
     const dataDir = process.env.MINECRAFT_DATA_DIR || './data';
     this.world = new WorldStore(path.join(dataDir, 'world.json'));
   }
@@ -130,6 +149,8 @@ export class BotController {
       edition: this.edition,
       bot,
       autopilot: this.autopilot ? this.autopilot.status() : { running: false },
+      tasks: this.taskStatus(),
+      consent: this.consentStatus(),
       recentChat: this.chat.slice(-20),
       coreUrl: this.coreUrl,
       world: { server: key, waypoints: waypoints.length, skills: skills.length },
@@ -153,7 +174,118 @@ export class BotController {
     return { skill: id, steps: results.length, results };
   }
 
+  consentStatus() {
+    return {
+      mode: this.consentMode,
+      pending: this.pendingConsent
+        ? { id: this.pendingConsent.id, action: this.pendingConsent.action, detail: this.pendingConsent.detail, created_at: this.pendingConsent.created_at }
+        : null,
+    };
+  }
+
+  consentReply(id, approve) {
+    const pending = this.pendingConsent;
+    if (!pending || (id && id !== pending.id)) return { resolved: false };
+    this.pendingConsent = null;
+    clearTimeout(pending.timer);
+    pending.resolve(!!approve);
+    return { resolved: true, id: pending.id, approved: !!approve };
+  }
+
+  #needsConsent(name, args) {
+    if (this.consentMode === 'allow') return null;
+    try {
+      if (name === 'dig') {
+        const block = this.bot?.blockNameAt?.(args.x, args.y, args.z);
+        if (block && /chest|furnace|door|bed|shulker|barrel|hopper|dispenser|beacon|spawner|crafting_table|anvil|enchanting|brewing/.test(block)) {
+          return `挖掉 ${block}（可能是箱子/设施）`;
+        }
+      } else if (name === 'place') {
+        const at = this.bot?.blockNameAt?.(args.x, args.y, args.z);
+        if (at && at !== 'air' && !/water|grass|snow|tall_grass|flower|air/.test(at)) return `在 ${at} 上放置方块`;
+      } else if (name === 'attack') {
+        const info = this.bot?.entityInfo?.(args.target || args.player || 'nearest');
+        if (info && PROTECTED_ENTITY.test(info.name || info.type || '')) return `攻击 ${info.name || info.type}`;
+      }
+    } catch { /* never block on a classification error */ }
+    return null;
+  }
+
+  async #requestConsent(action, detail) {
+    if (this.consentMode === 'allow') return true;
+    if (this.consentMode === 'deny') return false;
+    if (this.pendingConsent) return false; // one ask at a time
+    const id = `consent_${++this.consentSeq}`;
+    const payload = { id, action, detail, created_at: new Date().toISOString() };
+    this.emit('consent_request', payload);
+    return await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (this.pendingConsent?.id === id) {
+          this.pendingConsent = null;
+          this.emit('consent_timeout', payload);
+          resolve(false);
+        }
+      }, 60000);
+      this.pendingConsent = { ...payload, resolve, timer };
+    });
+  }
+
+  // --- background tasks (Numen-style: long jobs run in the background) -------
+  taskStatus(id) {
+    if (id) {
+      const task = this.tasks.get(String(id));
+      return task ? { ...task } : { error: `unknown task: ${id}` };
+    }
+    return { running: this.runningTaskId ? { ...this.tasks.get(this.runningTaskId) } : null, recent: [...this.tasks.values()].slice(-8) };
+  }
+
+  taskStop(id) {
+    const task = id ? this.tasks.get(String(id)) : this.tasks.get(this.runningTaskId);
+    if (!task || task.status !== 'running') return { stopped: false };
+    task.cancel = true;
+    try { this.bot?.stop?.(); } catch { /* ignore */ }
+    return { stopped: true, task_id: task.id };
+  }
+
+  async dispatch(name, args = {}, options = {}) {
+    if (options.background && LONG_ACTIONS.has(name)) {
+      if (this.runningTaskId) {
+        const running = this.tasks.get(this.runningTaskId);
+        return { refused: true, reason: `busy: task ${this.runningTaskId} (${running?.action}) is running`, task_id: this.runningTaskId };
+      }
+      const id = `task_${++this.taskSeq}`;
+      const task = { id, action: name, args, status: 'running', started_at: new Date().toISOString(), cancel: false };
+      this.tasks.set(id, task);
+      this.runningTaskId = id;
+      this.emit('task_started', { task_id: id, action: name, args });
+      this.action(name, args)
+        .then((result) => {
+          task.status = task.cancel ? 'cancelled' : 'done';
+          task.result = result;
+          this.emit('task_finished', { task_id: id, action: name, status: task.status, result });
+        })
+        .catch((error) => {
+          task.status = 'failed';
+          task.error = error.message;
+          this.emit('task_finished', { task_id: id, action: name, status: 'failed', error: error.message });
+        })
+        .finally(() => { if (this.runningTaskId === id) this.runningTaskId = null; });
+      return { task_id: id, status: 'running' };
+    }
+    return await this.action(name, args);
+  }
+
   async action(name, args = {}) {
+    if (name === 'task_status') return this.taskStatus(args.id);
+    if (name === 'task_stop') return this.taskStop(args.id);
+    if (name === 'consent_reply') return this.consentReply(args.id, args.approve);
+    if (name === 'consent_status') return this.consentStatus();
+    if (LONG_ACTIONS.has(name)) {
+      const detail = this.#needsConsent(name, args);
+      if (detail && !(await this.#requestConsent(name, detail))) {
+        return { refused: true, reason: `owner declined: ${detail}` };
+      }
+    }
     this.lastAction = { name, args, time: new Date().toISOString() };
     const key = this.serverKey();
     switch (name) {
@@ -161,7 +293,7 @@ export class BotController {
       case 'disconnect': await this.#dispose(); this.edition = null; return { disconnected: true };
       case 'chat': return this.requireBot().chat(args.message ?? args.text);
       case 'follow': return this.requireBot().follow(args.player ?? args.target, args.distance);
-      case 'goto': return this.requireBot().goto(args.x, args.y, args.z);
+      case 'goto': return this.requireBot().goto(args.x, args.y, args.z, !!args.allow_dig);
       case 'stop': return this.requireBot().stop();
       case 'look': return this.requireBot().lookAt(args.target || args.player || args);
       case 'dig': return this.requireBot().dig(args.x, args.y, args.z);
@@ -172,6 +304,8 @@ export class BotController {
       case 'players': return { players: this.bot ? this.bot.playerList?.() ?? this.bot.describe().players : [] };
       case 'scan_blocks': return this.requireBot().scanBlocks(args);
       case 'scan_entities': return this.requireBot().scanEntities(args);
+      case 'scan_grid': return this.requireBot().scanGrid(args);
+      case 'plan_route': return this.requireBot().planRoute(args);
       case 'skill_read': {
         const wanted = args.id || args.name;
         const md = await this.world.markdownSkill(wanted);

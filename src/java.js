@@ -122,7 +122,11 @@ export class JavaBot {
     bot.once('spawn', () => {
       this.state = 'connected';
       try {
-        bot.pathfinder.setMovements(new Movements(bot));
+        const movements = new Movements(bot);
+        // Default: never modify the world while walking (no digging/bridging).
+        movements.canDig = false;
+        movements.allow1by1towers = false;
+        bot.pathfinder.setMovements(movements);
       } catch (error) {
         this.emit('log', `java: pathfinder init failed: ${error.message}`);
       }
@@ -317,11 +321,12 @@ export class JavaBot {
     return { following: name, distance: range };
   }
 
-  async goto(x, y, z) {
+  async goto(x, y, z, allowDig = false) {
     const bot = this.requireReady();
+    try { if (bot.pathfinder.movements) bot.pathfinder.movements.canDig = !!allowDig; } catch { /* ignore */ }
     const goal = new goals.GoalBlock(Math.floor(Number(x)), Math.floor(Number(y)), Math.floor(Number(z)));
     bot.pathfinder.setGoal(goal);
-    return { goingTo: { x: Math.floor(Number(x)), y: Math.floor(Number(y)), z: Math.floor(Number(z)) } };
+    return { goingTo: { x: Math.floor(Number(x)), y: Math.floor(Number(y)), z: Math.floor(Number(z)) }, allowDig: !!allowDig };
   }
 
   async stop() {
@@ -442,6 +447,99 @@ export class JavaBot {
     }
     await bot.activateItem();
     return { used: item || bot.heldItem?.name || 'held item' };
+  }
+
+  /** Block name at a position (for consent checks). */
+  blockNameAt(x, y, z) {
+    const bot = this.requireReady();
+    const block = bot.blockAt(new Vec3(Math.floor(Number(x)), Math.floor(Number(y)), Math.floor(Number(z))));
+    return block?.name || 'air';
+  }
+
+  /** Info about a named entity (for consent checks). */
+  entityInfo(name) {
+    const entity = this.entityByName(name);
+    if (!entity) return null;
+    return { name: entity.name || entity.username || entity.displayName || entity.type || '', type: entity.type || '', username: entity.username || '' };
+  }
+
+  /**
+   * Egocentric semantic grid: a compact map of block "short codes" around the
+   * bot (feet + eye level). Follows Numen's idea of giving the model a spatial
+   * picture instead of a bare coordinate list.
+   */
+  async scanGrid(args = {}) {
+    const bot = this.requireReady();
+    const radius = clamp(Number(args.radius) || 4, 2, 6);
+    const origin = bot.entity?.position;
+    if (!origin) throw new Error('position unknown');
+    const cx = Math.floor(origin.x);
+    const cy = Math.floor(origin.y);
+    const cz = Math.floor(origin.z);
+    const names = new Map();
+    const short = (name) => {
+      if (!name || name === 'air') return '..';
+      if (!names.has(name)) {
+        const parts = name.split('_');
+        const code = parts.length === 1 ? name.slice(0, 2) : parts.map((p) => p[0]).join('').slice(0, 3);
+        names.set(name, code);
+      }
+      return names.get(name);
+    };
+    const layers = [];
+    for (const dy of [0, 1]) {
+      const rows = [];
+      for (let dz = -radius; dz <= radius; dz++) {
+        const cells = [];
+        for (let dx = -radius; dx <= radius; dx++) cells.push(short(bot.blockAt(new Vec3(cx + dx, cy + dy, cz + dz))?.name));
+        rows.push(cells.join(' '));
+      }
+      layers.push({ dy, rows });
+    }
+    return {
+      self: { x: cx, y: cy, z: cz },
+      radius,
+      legend: Object.fromEntries([...names.entries()].map(([name, code]) => [code, name])),
+      layers,
+      note: 'rows go from north(-z) to south(+z); columns west(-x) to east(+x); ".."=air. dy=0 feet, dy=1 eye.',
+    };
+  }
+
+  /**
+   * Plan (without moving) up to three candidate routes to a target, each with a
+   * "price tag": how many blocks must be dug and how many placed. Mirrors
+   * Numen's "list candidate routes with price tags, don't change the world".
+   */
+  async planRoute(args = {}) {
+    const bot = this.requireReady();
+    const tx = Math.floor(Number(args.x));
+    const ty = Math.floor(Number(args.y));
+    const tz = Math.floor(Number(args.z));
+    if (![tx, ty, tz].every(Number.isFinite)) throw new Error('x, y, z are required');
+    const origin = bot.entity?.position;
+    if (!origin) throw new Error('position unknown');
+    const ox = Math.floor(origin.x); const oy = Math.floor(origin.y); const oz = Math.floor(origin.z);
+    const sample = (y) => {
+      let dig = 0; let place = 0;
+      const steps = Math.max(Math.abs(tx - ox), Math.abs(tz - oz), 1);
+      for (let i = 0; i <= steps; i++) {
+        const x = Math.round(ox + ((tx - ox) * i) / steps);
+        const z = Math.round(oz + ((tz - oz) * i) / steps);
+        const feet = bot.blockAt(new Vec3(x, y, z));
+        const head = bot.blockAt(new Vec3(x, y + 1, z));
+        const ground = bot.blockAt(new Vec3(x, y - 1, z));
+        if (feet && feet.name !== 'air') dig++;
+        if (head && head.name !== 'air') dig++;
+        if (!ground || ground.name === 'air') place++;
+      }
+      return { dig, place };
+    };
+    const candidates = [
+      { id: 'route-current-y', y: oy, note: '沿当前高度直走', ...sample(oy) },
+      { id: 'route-target-y', y: ty, note: '先到目标高度再直走', ...sample(ty) },
+      { id: 'route-step', y: Math.min(oy, ty), note: '按较低高度走，再上下', ...sample(Math.min(oy, ty)) },
+    ];
+    return { target: { x: tx, y: ty, z: tz }, candidates, note: 'dig/place 是该路线大概需要挖/放的方块数；走路默认不改世界，要挖请 goto 时带 allow_dig。' };
   }
 
   async disconnect() {

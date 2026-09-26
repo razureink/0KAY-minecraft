@@ -18,12 +18,17 @@
 
 const JAVA_ACTIONS = [
   'follow', 'goto', 'stop', 'look', 'dig', 'place', 'attack', 'use',
-  'inventory', 'scan_blocks', 'scan_entities', 'chat',
+  'inventory', 'scan_blocks', 'scan_entities', 'scan_grid', 'plan_route', 'chat',
   'waypoint_add', 'waypoint_goto', 'skill_run', 'skill_read', 'skill_list',
+  'task_status', 'task_stop', 'consent_reply', 'consent_status',
 ];
 
 // Bedrock has no movement/action implementation yet: only observe + talk.
-const BEDROCK_ACTIONS = ['stop', 'look', 'inventory', 'scan_blocks', 'scan_entities', 'chat', 'waypoint_add', 'skill_read', 'skill_list'];
+const BEDROCK_ACTIONS = ['stop', 'look', 'inventory', 'scan_blocks', 'scan_entities', 'scan_grid', 'chat', 'waypoint_add', 'skill_read', 'skill_list', 'task_status', 'task_stop', 'consent_reply', 'consent_status'];
+
+// Long actions run in the background as tasks (task_id) so the brain can keep
+// thinking; the body reports back through task_finished events / task_status.
+const LONG_ACTIONS = new Set(['goto', 'follow', 'dig', 'place', 'attack', 'use', 'skill_run', 'waypoint_goto']);
 
 const MOVE_ACTIONS = new Set(['goto', 'waypoint_goto']);
 const HOLD_ACTIONS = new Set(['follow']);
@@ -225,6 +230,9 @@ export class Autopilot {
       waypoints: (world.waypoints || []).map((w) => ({ name: w.name, x: round(w.x), y: round(w.y), z: round(w.z) })),
       skills: (world.skills || []).map((s) => s.name),
       knowledge: (world.markdown || []).map((s) => `${s.name}${s.note ? ` — ${s.note}` : ''}`),
+      runningTask: (() => {
+        try { return this.controller.taskStatus?.()?.running || null; } catch { return null; }
+      })(),
       outcomes: this.history.slice(-6),
       failures: this.failures.slice(-6),
     };
@@ -246,6 +254,7 @@ export class Autopilot {
       `Known skills: ${o.skills.join(', ') || '(none)'}`,
       `Skill knowledge (Markdown, read with skill_read): ${o.knowledge.join(' | ') || '(none)'}`,
       `You were mentioned recently: ${o.mentioned ? 'yes' : 'no'}`,
+      `Background task: ${o.runningTask ? `${o.runningTask.action} (${o.runningTask.id}, running since ${o.runningTask.started_at})` : '(none)'}`,
     );
     if (o.outcomes.length) {
       lines.push('Recent outcomes (newest last):', ...o.outcomes.map((h) => `- ${h.action}: ${h.result}${h.detail ? ` (${h.detail})` : ''}`));
@@ -340,39 +349,35 @@ export class Autopilot {
       }
     }
 
-    const before = observation.position;
-    const startedAt = Date.now();
     let result = null;
     let outcome = 'ok';
     let detail = '';
     try {
-      if (MOVE_ACTIONS.has(decision.action)) {
-        result = await this.#withTimeout(
-          this.controller.action(decision.action, decision.args),
-          this.moveTimeoutMs,
-          decision.action,
-        );
-      } else if (HOLD_ACTIONS.has(decision.action)) {
-        // follow keeps the goal active; don't await it forever.
-        result = await this.controller.action(decision.action, decision.args);
+      if (LONG_ACTIONS.has(decision.action)) {
+        // ONE body, ONE job: don't dispatch while a task is already running.
+        if (observation.runningTask) {
+          outcome = 'skipped';
+          detail = `busy with ${observation.runningTask.action} (${observation.runningTask.id})`;
+        } else {
+          result = await this.controller.dispatch(decision.action, decision.args, { background: true });
+          if (result && result.refused) {
+            outcome = 'failed';
+            detail = result.reason || 'refused';
+          } else {
+            detail = `dispatched ${result?.task_id || ''}`.trim();
+          }
+        }
       } else {
-        result = await this.controller.action(decision.action, decision.args);
+        result = await this.#withTimeout(this.controller.action(decision.action, decision.args), 15000, decision.action);
+        if (result && result.refused) {
+          outcome = 'failed';
+          detail = result.reason || 'refused';
+        }
       }
     } catch (error) {
       outcome = 'failed';
       detail = error.message;
       this.#note(`${decision.action} -> ${error.message}`);
-    }
-    const elapsed = Date.now() - startedAt;
-    if (outcome !== 'failed' && MOVE_ACTIONS.has(decision.action) && before) {
-      const after = this.controller.bot?.describe?.().position;
-      const moved = distance(before, after);
-      detail = moved == null ? 'started' : `moved ${moved}m`;
-      if (moved != null && moved < 1 && elapsed > 1500) {
-        outcome = 'failed';
-        detail = `did not move (${detail})`;
-        this.#note(`${decision.action} -> ${detail}`);
-      }
     }
     this.#record(decision.action, outcome, detail);
     return result;

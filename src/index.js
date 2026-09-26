@@ -11,15 +11,22 @@ import http from 'http';
 import { BotController } from './controller.js';
 import { Autopilot } from './autopilot.js';
 import { startPlugin } from './plugin.js';
+import { startMcpServer } from './mcp.js';
 
 const PORT = Number(process.env.MINECRAFT_PORT) || 8765;
 const HOST = process.env.MINECRAFT_BIND_HOST || '127.0.0.1';
 const CORE_URL = process.env.CORE_HTTP_ADDR || process.env.CORE_HTTP || 'http://127.0.0.1:8080';
 const TOKEN = process.env.MINECRAFT_TOKEN || '';
+const MCP_ENABLED = /^(1|true)$/i.test(String(process.env.MINECRAFT_MCP || ''));
+
+// MCP uses stdout as its transport: keep logs on stderr so the protocol stays clean.
+if (MCP_ENABLED) console.log = (...args) => console.error(...args);
 
 const controller = new BotController({ coreUrl: CORE_URL });
 const autopilot = new Autopilot(controller, { coreUrl: CORE_URL });
 controller.autopilot = autopilot;
+
+if (MCP_ENABLED) startMcpServer(controller, { version: '0.1.0' });
 
 const serverSettings = {};
 let pluginHandle = null;
@@ -157,7 +164,7 @@ const server = http.createServer(async (req, res) => {
     if (path === '/action') {
       const action = String(body.action || '');
       const args = action === 'connect' ? mergedConnectArgs(body.args || {}) : (body.args || {});
-      const result = await controller.action(action, args);
+      const result = await controller.dispatch(action, args, { background: !!body.background });
       if (action === 'connect') maybeAutoStartAutopilot();
       send(res, 200, { ok: true, result });
       return;
