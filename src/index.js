@@ -48,6 +48,20 @@ async function pollSettings() {
   }
 }
 
+function truthy(value) {
+  return value === true || value === 1 || String(value) === 'true' || String(value) === '1';
+}
+
+/** Honor the minecraft.autopilot_default / autopilot_interval_ms settings. */
+function maybeAutoStartAutopilot() {
+  try {
+    if (!controller.connected || autopilot.running) return;
+    if (!truthy(serverSettings.autopilot_default)) return;
+    const intervalMs = Number(serverSettings.autopilot_interval_ms) || undefined;
+    autopilot.start({ intervalMs });
+  } catch { /* ignore */ }
+}
+
 const sseClients = new Set();
 controller.on((type, data) => {
   const payload = `data: ${JSON.stringify({ type, data })}\n\n`;
@@ -144,6 +158,7 @@ const server = http.createServer(async (req, res) => {
       const action = String(body.action || '');
       const args = action === 'connect' ? mergedConnectArgs(body.args || {}) : (body.args || {});
       const result = await controller.action(action, args);
+      if (action === 'connect') maybeAutoStartAutopilot();
       send(res, 200, { ok: true, result });
       return;
     }
@@ -161,6 +176,7 @@ const server = http.createServer(async (req, res) => {
     if (allowed.has(shortcut)) {
       const args = shortcut === 'connect' ? mergedConnectArgs({ ...body, ...(body.args || {}) }) : { ...body };
       const result = await controller.action(shortcut, args);
+      if (shortcut === 'connect') maybeAutoStartAutopilot();
       send(res, 200, { ok: true, result });
       return;
     }

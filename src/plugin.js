@@ -121,11 +121,13 @@ export async function startPlugin({ address, getActiveTasks = () => 0 }) {
       { deadline: Date.now() + 5000 },
       (err, response) => {
         if (err) {
+          // Only a genuinely lost registration should trigger a re-register;
+          // a transient heartbeat error must not reset pluginId (that caused a
+          // register/heartbeat loop).
           if (err.code === grpc.status.UNAVAILABLE || err.code === grpc.status.NOT_FOUND) pluginId = null;
           return;
         }
         if (response?.shutdownSignal) console.warn('[minecraft] Core requested shutdown');
-        else if (!response?.ok) pluginId = null;
       },
     );
   };
