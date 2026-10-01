@@ -101,7 +101,10 @@ export async function startPlugin({ address, getActiveTasks = () => 0 }) {
     client.waitForReady(new Date(Date.now() + 5000), async (err) => {
       if (err) { resolve(null); return; }
       request.pluginInfo.version = await manifestVersion();
-      client.Register(request, { deadline: Date.now() + 5000 }, (error, response) => {
+      const registrationMetadata = new grpc.Metadata();
+      const registrationToken = (process.env.CORE_PLUGIN_REGISTRATION_TOKEN || '').trim();
+      if (registrationToken) registrationMetadata.set('x-0kay-registration-token', registrationToken);
+      client.Register(request, registrationMetadata, { deadline: Date.now() + 5000 }, (error, response) => {
         if (error || !response?.success) {
           resolve(null);
           return;
