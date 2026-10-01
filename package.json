@@ -1,6 +1,6 @@
 {
   "name": "@razuresoft/0kay-minecraft",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "0kay Minecraft bot service - connect, chat and play with people. Java Edition via mineflayer, Bedrock via bedrock-protocol.",
